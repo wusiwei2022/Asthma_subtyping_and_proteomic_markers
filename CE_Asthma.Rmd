@@ -1,0 +1,934 @@
+---
+title: "CE_analysis"
+author: "Siwei Wu"
+date: "2023/5/5"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We have 5 aims for this asthma study
+
+Dataset: Cohort A - D
+Aim 1: investigate proteomics markers of asthma(Cohort A&B&C VS Cohort D)
+* Univariate analysis: logistic regression
+* Stability selection logistic lasso
+Aim 2: investigate proteomics markers of asthma severity(severe(cohort A&B) VS moderate/mild(cohort C) VS health(cohort A))
+* Univariate analysis: Multinomial logistic regression
+* Stability selection Multinomial logistic lasso
+
+Dataset: Cohort A - C
+Aim 3: investigate proteomics markers of asthma subtypes(Eosinophilic VS Mixed granulocytic VS Neutrophilic VS Paucigranulocytic)
+* Univariate analysis: multinomical logistic regression
+* Stability selection Multinomial logistic lasso
+
+Aim 4: investigate proteomics markers of asthma severity metrics
+* Partial least square analysis
+
+Aim 5: investigate proteomics markers of asthma severity score
+* Clustering to build the asthma severity score
+* Univariate analysis: Multinomial logistic regression
+* Stability selection Multinomial logistic lasso
+
+```{r}
+rm(list=ls())
+path = dirname(rstudioapi::getActiveDocumentContext()$path)
+setwd(path)
+rm(path)
+```
+
+```{r}
+library(nnet)
+library(sgPLS)
+library(glmnet)
+library(sharp)
+```
+
+
+```{r}
+data = readRDS("data/data_denoised_0505.rds")
+colnames(data)
+```
+
+## Pre-analysis
+```{r}
+# ## One hot encode asthma status
+# data$health = ifelse(data$Cohort == "D" ,1,0)
+# data$severe = ifelse(data$Cohort == "A"|data$Cohort == "B", 1, 0)
+# data$mild_moderate = ifelse(data$Cohort == "C", 1, 0)
+# 
+# # Create multinomial outcome
+# data = data %>% mutate(asthma_severity = recode(Cohort, "D"="health", "C"="mild_moderate", "A"="severe", "B" = "severe")) 
+```
+
+# Aim 1 - Aim 2
+## Data preparation
+```{r}
+data_varsel_x = data[ ,c(which(colnames(data)=="CCL18"):which(colnames(data)=="IL.4"),
+                         which(colnames(data)=="Sex"), 
+                         which(colnames(data)=="Age"), 
+                         which(colnames(data)=="Race"),
+                         which(colnames(data)=="BMI"), 
+                         which(colnames(data)=="Pack_Years"))]
+
+## transform categorical variables into numeric values for penalized model
+data_varsel_x$Sex = ifelse(data_varsel_x$Sex  == "female", 0, 1)
+data_varsel_x$Race = ifelse(data_varsel_x$Race=="others", 0, 1)
+data_varsel_x = as.matrix(data_varsel_x)
+data_varsel_asthma = as.matrix(data$asthma)
+data_varsel_severity = as.matrix(data$asthma_severity)
+```
+
+
+## Aim 1: Outcome as case(cohort A, B, and C) vs controls(cohort D): logistic logistic regression
+### Univariate analysis: Adjusted for Sex + Age + Race + BMI + Pack_Years
+Fit model
+```{r}
+binom_asthma_model = list()
+binom_asthma_coef = as.data.frame(matrix(NA, which(colnames(data)== "IL.4"), 4))
+colnames(binom_asthma_coef) = c("coef", "se", "z_value", "pvalue")
+rownames(binom_asthma_coef) = colnames(data)[which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")]
+```
+
+```{r}
+for(i in which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")){
+  binom_asthma_model[[i]]=glm(asthma ~ data[,i] + Sex + Age + Race + BMI + Pack_Years ,family = "binomial", data=data)
+  binom_asthma_coef[i,] = summary(binom_asthma_model[[i]])$coefficient[2,]
+}
+binom_asthma_coef$BHPvalue = p.adjust(binom_asthma_coef$pvalue, method = "BH")
+```
+
+
+### Stability selection lasso
+Running Stability Selection LASSO on proteomic data with asthma as outcome adjusted for Sex, age, race, BMI, and pack_years 
+```{r}
+varSel_asthma = VariableSelection(data_varsel_x, data_varsel_asthma, family = "binomial",
+                           penalty.factor = c(rep(1, which(colnames(data)=="IL.4") - which(colnames(data)=="CCL18") + 1), 
+                                              rep(0, dim(data_varsel_x)[2]-which(colnames(data)=="IL.4") - which(colnames(data)=="CCL18") + 1))) 
+selprop_asthma = SelectionProportions(varSel_asthma) 
+selprop_asthma  = as.data.frame(selprop_asthma)
+selprop_asthma$protein = rownames(selprop_asthma)
+```
+
+### Plot
+#### Univariate analysis:
+```{r}
+binom_asthma_coef_plot = binom_asthma_coef %>% mutate(protein = rownames(binom_asthma_coef)) %>% select(protein, coef, BHPvalue)
+```
+
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=binom_asthma_coef_plot, aes(y=exp(coef), x=-log10(BHPvalue))) +
+  geom_text_repel(aes(y=exp(coef), x=-log10(BHPvalue), label=ifelse(-log10(BHPvalue)>-log10(0.05),protein,"")))+
+  geom_point(color="tomato")+
+  theme_bw()+
+  geom_hline(yintercept = 1, linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5))+
+  labs(title = "Univariate analysis: Astham status ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Odds ratio")
+```
+
+
+
+#### Stability selection plot
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=selprop_asthma, aes(x=protein, y=selprop_asthma)) + 
+  geom_col(width = 0.6, fill= ifelse(selprop_asthma$selprop_asthma>=Argmax(varSel_asthma)[,"pi"], "red", "grey")) + 
+  theme_bw()+
+  theme(axis.text.x.bottom = element_text(angle=45, size = 12, hjust=1, vjust = 1), plot.title = element_text(hjust = 0.5))+
+  geom_hline(yintercept = Argmax(varSel_asthma)[,"pi"], col = "red", linetype=2)+
+  labs(title="Variable selection proportion(asthma status)", y="selection proportion")
+```
+
+
+#### Stability selection lasso VS univariate analysis
+Prepare data for plot
+```{r}
+binom_asthma_coef_plot = inner_join(binom_asthma_coef_plot, selprop_asthma)
+```
+Make comparison plot between uni-variate analysis and stability selection lasso
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=binom_asthma_coef_plot, aes(y=selprop_asthma, x=-log10(BHPvalue))) +
+  geom_point(color="tomato")+
+  geom_text_repel(aes(y=selprop_asthma, x=-log10(BHPvalue), 
+                      label=ifelse(-log10(BHPvalue)>-log10(0.05)&selprop_asthma>=Argmax(varSel_asthma)[,"pi"],protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = Argmax(varSel_asthma)[,"pi"], linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Univariate VS Var selection: Astham status ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Selection proportion")
+```
+
+
+
+
+
+## Aim 2: Outcome as severe(cohort A and B) vs moderate/mild(cohort C) vs health(cohort D): multinomial logistic (optional)
+### Univariate analysis: Base model (Adjusted for sex + age + race)
+Fit model
+```{r}
+# multinom_protein_base_model = list()
+# multinom_protein_base_coef = as.data.frame(matrix(NA, which(colnames(data)== "IL.4"), 4))
+# colnames(multinom_protein_base_coef) = c("coef(mild_moderate)", "coef(severe)", "se(mild_moderate)", "se(severe)")
+# rownames(multinom_protein_base_coef) = colnames(data)[which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")]
+# 
+# for(i in which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")){
+#   multinom_protein_base_model[[i]]=multinom(asthma_severity ~ data[,i] + Sex + Age + Race, data=data)
+#   multinom_protein_base_coef[i,] = c(coef(multinom_protein_base_model[[i]])[,2], summary(multinom_protein_base_model[[i]])$standard.errors[,2])
+# }
+
+```
+
+Plot
+```{r}
+# multinom_protein_base_coef_plot = multinom_protein_base_coef %>% mutate(protein = rownames(multinom_protein_base_coef))
+# colnames(multinom_protein_base_coef_plot) = c("mild_moderate", "severe", "mild_moderate", "severe", "protein")
+# multinom_protein_base_coef_plot = inner_join(
+#   multinom_protein_base_coef_plot[,c(1:2,5)] %>% pivot_longer(cols = -protein ,values_to = "coef", names_to = "severity"),
+#   multinom_protein_base_coef_plot[,c(3:4,5)] %>% pivot_longer(cols = -protein ,values_to = "se", names_to = "severity"))
+```
+
+```{r}
+# ggplot(data=multinom_protein_base_coef_plot, aes(x=protein, y=exp(coef), color = severity)) +
+#   geom_point()+
+#   theme_bw()+
+#   theme(axis.text.x = element_text(angle = 45, vjust = 0.5), legend.position = "bottom")+
+#   labs(title = "Multinomial univariate logist(Base model): Astham severtity ~ protein",
+#        color = "Astham severity(health controls as baseline)")
+```
+
+### Univariate analysis: Adjusted for Sex + Age + Race + BMI + Pack_Years
+Fit model
+```{r}
+# multinom_protein_BMI_SMK_model = list()
+# multinom_protein_BMI_SMK_coef = as.data.frame(matrix(NA, which(colnames(data)== "IL.4"), 4))
+# colnames(multinom_protein_BMI_SMK_coef) = c("coef(mild_moderate)", "coef(severe)", "se(mild_moderate)", "se(severe)")
+# rownames(multinom_protein_BMI_SMK_coef) = colnames(data)[which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")]
+# 
+# for(i in which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")){
+#   multinom_protein_BMI_SMK_model[[i]]=multinom(asthma_severity ~ data[,i] + Sex + Age + Race + BMI + Pack_Years , data=data)
+#   multinom_protein_BMI_SMK_coef[i,] = c(coef(multinom_protein_BMI_SMK_model[[i]])[,2], summary(multinom_protein_BMI_SMK_model[[i]])$standard.errors[,2])
+# }
+
+```
+
+Plot
+```{r}
+# multinom_protein_BMI_SMK_coef_plot = multinom_protein_BMI_SMK_coef %>% mutate(protein = rownames(multinom_protein_BMI_SMK_coef))
+# colnames(multinom_protein_BMI_SMK_coef_plot) = c("mild_moderate", "severe", "mild_moderate", "severe", "protein")
+# multinom_protein_BMI_SMK_coef_plot = inner_join(
+#   multinom_protein_BMI_SMK_coef_plot[,c(1:2,5)] %>% pivot_longer(cols = -protein ,values_to = "coef", names_to = "severity"),
+#   multinom_protein_BMI_SMK_coef_plot[,c(3:4,5)] %>% pivot_longer(cols = -protein ,values_to = "se", names_to = "severity"))
+```
+
+```{r}
+# ggplot(data=multinom_protein_BMI_SMK_coef_plot, aes(x=protein, y=exp(coef), color = severity)) +
+#   geom_point()+
+#   theme_bw()+
+#   theme(axis.text.x = element_text(angle = 45, vjust = 0.5), legend.position = "bottom")+
+#   labs(title = "Multinomial univariate logist(BMI and Smoking adjusted): Astham severtity ~ protein",
+#        color = "Astham severity(health controls as baseline)")
+```
+
+### Stability selection lasso
+```{r}
+# varSel_severity = VariableSelection(data_varsel_x, data_varsel_severity, family =  "multinomial",
+#                            penalty.factor = c(rep(1, which(colnames(data)=="IL.4") - which(colnames(data)=="CCL18") + 1), 
+#                                               rep(0, dim(data_varsel_x)[2]-which(colnames(data)=="IL.4") - which(colnames(data)=="CCL18") + 1))) 
+# selprop_severity = SelectionProportions(varSel_severity) 
+```
+
+# Aim 3 - Aim 5
+For Aim 3 to Aim 5, we will only use cohort A to cohort C
+## Data preparation
+```{r}
+data_cases =  data %>% filter(data$Cohort != "D")
+# data_cases$asthma_phenotype = factor(data_cases$asthma_phenotype, levels = c("Paucigranulocytic", "Eosinophilic", "Neutrophilic", "Mixed granulocytic"))
+data_cases$asthma_severity = factor(data_cases$asthma_severity, levels=c("mild_moderate", "severe"))
+```
+
+Data preparation for Multivariable analysis
+```{r}
+data_cases_varsel_x = data_cases[ ,c(which(colnames(data_cases)=="CCL18"):which(colnames(data_cases)=="IL.4"),
+                         which(colnames(data_cases)=="Sex"), 
+                         which(colnames(data_cases)=="Age"), 
+                         which(colnames(data_cases)=="Race"),
+                         which(colnames(data_cases)=="BMI"), 
+                         which(colnames(data_cases)=="Pack_Years"))]
+
+## transform categorical variables into numeric values for penalized model
+data_cases_varsel_x$Sex = ifelse(data_cases_varsel_x$Sex  == "female", 0, 1)
+data_cases_varsel_x$Race = ifelse(data_cases_varsel_x$Race=="others", 0, 1)
+# data_cases_varsel_x = as.matrix(data_cases_varsel_x)
+
+
+data_cases_varsel_phenotype = as.factor(data_cases$asthma_phenotype)
+# data_cases_varsel_severvity_metrics 
+# data_cases_varsel_severvity_score 
+```
+
+
+## Aim 2: Outcome as severe(cohort A and B) vs moderate/mild(cohort C)
+### Univariate analysis: Adjusted for Sex + Age + Race + BMI + Pack_Years
+Fit model
+```{r}
+binom_severity_model = list()
+binom_severity_coef = as.data.frame(matrix(NA, which(colnames(data_cases)== "IL.4"), 4))
+colnames(binom_severity_coef) = c("coef", "se", "z_value", "pvalue")
+rownames(binom_severity_coef) = colnames(data)[which(colnames(data)=="CCL18"): which(colnames(data)== "IL.4")]
+```
+
+```{r}
+for(i in which(colnames(data_cases)=="CCL18"): which(colnames(data_cases)== "IL.4")){
+  binom_severity_model[[i]]=glm(asthma_severity ~ data_cases[,i] + Sex + Age + Race + BMI + Pack_Years ,family = "binomial", data=data_cases)
+  binom_severity_coef[i,] = summary(binom_severity_model[[i]])$coefficient[2,]
+}
+binom_severity_coef$BHPvalue = p.adjust(binom_severity_coef$pvalue, method = "BH")
+```
+
+### Stability selection lasso
+```{r}
+varSel_severity = VariableSelection(data_cases_varsel_x, as.matrix(data_cases$asthma_severity), family =  "binomial",
+                           penalty.factor = c(rep(1, which(colnames(data_cases_varsel_x)=="IL.4") - which(colnames(data_cases_varsel_x)=="CCL18") + 1), 
+                                              rep(0, dim(data_cases_varsel_x)[2]-which(colnames(data_cases_varsel_x)=="IL.4") - which(colnames(data_cases_varsel_x)=="CCL18") + 1))) 
+selprop_severity = SelectionProportions(varSel_severity) 
+selprop_severity = as.data.frame(selprop_severity)
+selprop_severity$protein = rownames(selprop_severity)
+```
+
+### Plot
+#### Univariate analysis:
+```{r}
+binom_severity_coef_plot = binom_severity_coef %>% mutate(protein = rownames(binom_severity_coef)) %>% select(protein, coef, BHPvalue)
+```
+
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=binom_severity_coef_plot, aes(y=exp(coef), x=-log10(BHPvalue))) +
+  geom_text_repel(aes(y=exp(coef), x=-log10(BHPvalue), label=ifelse(-log10(BHPvalue)>-log10(0.05),protein,"")))+
+  geom_point(color="tomato")+
+  theme_bw()+
+  geom_hline(yintercept = 1, linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5))+
+  labs(title = "Univariate analysis: Astham severtity ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Odds ratio")
+```
+
+
+#### Stability selection plot
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=selprop_severity, aes(x=protein, y=selprop_severity)) + 
+  geom_col(width = 0.6, fill= ifelse(selprop_severity$selprop_severity>=Argmax(varSel_severity)[,"pi"], "red", "grey")) + 
+  theme_bw()+
+  theme(axis.text.x.bottom = element_text(angle=45, size = 12, hjust=1, vjust = 1), plot.title = element_text(hjust = 0.5))+
+  geom_hline(yintercept = Argmax(varSel_severity)[,"pi"], col = "red", linetype=2)+
+  labs(title="Variable selection proportion(asthma severity)", y="selection proportion")
+```
+
+#### Stability selection lasso VS univariate analysis
+Prepare data for plot
+```{r}
+binom_severity_coef_plot = inner_join(binom_severity_coef_plot, selprop_severity)
+```
+
+Make comparison plot between uni-variate analysis and stability selection lasso
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=binom_severity_coef_plot, aes(y=selprop_severity, x=-log10(BHPvalue))) +
+  geom_point(color="tomato")+
+  geom_text_repel(aes(y=selprop_severity, x=-log10(BHPvalue), 
+                      label=ifelse(-log10(BHPvalue)>-log10(0.05)&selprop_severity>=Argmax(varSel_severity)[,"pi"],protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = Argmax(varSel_severity)[,"pi"], linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Univariate VS Var selection: Astham severity ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Selection proportion")
+```
+
+
+## Aim 3: Outcome as astham phenotype: Eosinophilic vs Mixed granulocytic vs Neutrophilic vs Paucigranulocytic: Multinomial regression
+### Univariate analysis: Multinomial model adjusted for sex, age, race, BMI, and Smoking(Pack years)
+Fit model 
+```{r}
+## Container for data output
+multinom_phenotype_model = list()
+multinom_phenotype_coef = as.data.frame(matrix(NA, which(colnames(data_cases)== "IL.4"), 9))
+colnames(multinom_phenotype_coef) = c("coef(Eosinophilic)", "coef(Neutrophilic)", "coef(Mixed granulocytic)", 
+                                      "se(Eosinophilic)", "se(Neutrophilic)", "se(Mixed granulocytic)",
+                                      "p(Eosinophilic)", "p(Neutrophilic)", "p(Mixed granulocytic)")
+rownames(multinom_phenotype_coef) = colnames(data_cases)[which(colnames(data_cases)=="CCL18"): which(colnames(data_cases)== "IL.4")]
+
+## Model fitting and coefficient extractuing
+for(i in which(colnames(data_cases)=="CCL18"): which(colnames(data_cases)== "IL.4")){
+  multinom_phenotype_model[[i]]=multinom(asthma_phenotype ~ data_cases[,i] + Sex + Age + Race + BMI + Pack_Years, data=data_cases)
+  multinom_phenotype_coef[i,] = c(coef(multinom_phenotype_model[[i]])[,2] , # point estimate
+                                  summary(multinom_phenotype_model[[i]])$standard.errors[,2], # Standard Error
+                                  (1-pnorm(abs(coef(multinom_phenotype_model[[i]])[,2]/summary(multinom_phenotype_model[[i]])$standard.errors[,2]),0,1))*2 # P valaue
+                                  )}
+
+multinom_phenotype_coef$`pBH(Eosinophilic)` = p.adjust(multinom_phenotype_coef$`p(Eosinophilic)`, method = "BH")
+multinom_phenotype_coef$`pBH(Neutrophilic)` = p.adjust(multinom_phenotype_coef$`p(Neutrophilic)`, method = "BH")
+multinom_phenotype_coef$`pBH(Mixed granulocytic)` = p.adjust(multinom_phenotype_coef$`p(Mixed granulocytic)`, method = "BH")
+```
+
+Plot
+Data preparation for plot
+```{r}
+multinom_phenotype_coef_plot = multinom_phenotype_coef %>% mutate(protein = rownames(multinom_phenotype_coef))
+colnames(multinom_phenotype_coef_plot) = c("Eosinophilic", "Neutrophilic", "Mixed granulocytic", 
+                                           "Eosinophilic", "Neutrophilic", "Mixed granulocytic",
+                                           "Eosinophilic", "Neutrophilic", "Mixed granulocytic",
+                                           "Eosinophilic", "Neutrophilic", "Mixed granulocytic",
+                                           "protein")
+multinom_phenotype_coef_plot = 
+  inner_join(
+  inner_join(
+  inner_join(
+  multinom_phenotype_coef_plot[,c(1:3,13)] %>% pivot_longer(cols = -protein ,values_to = "coef", names_to = "phenotype"),
+  multinom_phenotype_coef_plot[,c(4:6,13)] %>% pivot_longer(cols = -protein ,values_to = "se", names_to = "phenotype")
+  ),
+  multinom_phenotype_coef_plot[,c(7:9,13)] %>% pivot_longer(cols = -protein ,values_to = "Pvalue", names_to = "phenotype")
+  ),
+  multinom_phenotype_coef_plot[,c(10:12,13)] %>% pivot_longer(cols = -protein ,values_to = "BHPvalue", names_to = "phenotype")
+  )
+```
+Plot scatter plot
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=multinom_phenotype_coef_plot, aes(y=exp(coef), x=-log10(BHPvalue), color = c(phenotype))) +
+  geom_point()+
+  geom_text_repel(aes(y=exp(coef), x=-log10(BHPvalue), label=ifelse(-log10(BHPvalue)>-log10(0.05),protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = 1, linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Multinomial univariate logist: Astham phenotype ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Odds ratio",
+       color = "Phenotype")
+```
+
+### Stability selection lasso
+Running Stability Selection LASSO on proteomic data with asthma phenotype as outcome adjusted for Sex, age, race, BMI, and pack_years 
+```{r}
+varSel_phenotype = VariableSelection(data_cases_varsel_x, data_cases_varsel_phenotype, family = "multinomial",
+                                     penalty.factor = c(rep(1, which(colnames(data_cases_varsel_x)=="IL.4") - which(colnames(data_cases_varsel_x)=="CCL18") + 1),
+                                                        rep(0, dim(data_cases_varsel_x)[2]-which(colnames(data_cases_varsel_x)=="IL.4")))) 
+selprop_phenotype = SelectionProportions(varSel_phenotype)
+selprop_phenotype = as.data.frame(selprop_phenotype)
+selprop_phenotype$protein = rownames(selprop_phenotype)
+```
+### PLOT
+#### Stability selection plot
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=selprop_phenotype, aes(x=protein, y=selprop_phenotype)) + 
+  geom_col(width = 0.6, fill= ifelse(selprop_phenotype$selprop_phenotype>=Argmax(varSel_phenotype)[,"pi"], "red", "grey")) + 
+  theme_bw()+
+  theme(axis.text.x.bottom = element_text(angle=45, size = 12, hjust=1, vjust = 1), plot.title = element_text(hjust = 0.5))+
+  geom_hline(yintercept = Argmax(varSel_phenotype)[,"pi"], col = "red", linetype=2)+
+  labs(title="Variable selection proportion(asthma phenotype)", y="selection proportion")
+```
+
+#### Stability selection lasso VS univariate analysis
+Prepare data for plot
+```{r}
+multinom_phenotype_coef_plot = multinom_phenotype_coef %>% mutate(protein = rownames(multinom_phenotype_coef))
+multinom_phenotype_coef_plot = inner_join(multinom_phenotype_coef_plot, selprop_phenotype)
+colnames(multinom_phenotype_coef_plot) = c("Eosinophilic", "Neutrophilic", "Mixed granulocytic", 
+                                           "Eosinophilic", "Neutrophilic", "Mixed granulocytic",
+                                           "Eosinophilic", "Neutrophilic", "Mixed granulocytic",
+                                           "Eosinophilic", "Neutrophilic", "Mixed granulocytic",
+                                           "protein", "selprop")
+multinom_phenotype_coef_plot = 
+  inner_join(
+  inner_join(
+  inner_join(
+  multinom_phenotype_coef_plot[,c(1:3,13,14)] %>% pivot_longer(cols = -c("protein","selprop"), values_to = "coef", names_to = "phenotype"),
+  multinom_phenotype_coef_plot[,c(4:6,13,14)] %>% pivot_longer(cols = -c("protein","selprop"), values_to = "se", names_to = "phenotype")
+  ),
+  multinom_phenotype_coef_plot[,c(7:9,13,14)] %>% pivot_longer(cols = -c("protein","selprop"), values_to = "Pvalue", names_to = "phenotype")
+  ),
+  multinom_phenotype_coef_plot[,c(10:12,13,14)] %>% pivot_longer(cols = -c("protein","selprop"), values_to = "BHPvalue", names_to = "phenotype")
+  )
+```
+Make comparison plot between uni-variate analysis and stability selection lasso
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=multinom_phenotype_coef_plot, aes(y=selprop, x=-log10(BHPvalue), color = c(phenotype))) +
+  geom_point()+
+  geom_text_repel(aes(y=selprop, x=-log10(BHPvalue), 
+                      label=ifelse(-log10(BHPvalue)>-log10(0.05)&selprop>=Argmax(varSel_phenotype)[,"pi"],protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = Argmax(varSel_phenotype)[,"pi"], linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Univariate VS Var selection: Astham phenotype ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Selection proportion",
+       color = "Phenotype")
+```
+
+
+
+
+## Aim 4: Outcome as asthma severity metrics
+### Univariate analysis
+### Stability selection lasso
+Data preparation:
+```{r}
+data_cases$Sex = ifelse(data_cases$Sex  == "female", 0, 1)
+data_cases$Race = ifelse(data_cases$Race=="others", 0, 1)
+```
+
+
+```{r}
+data_cases_sevr_metric = data_cases %>% select("fev1_percentage", "fvc_percentage","exacerbation_per_year","severe_exacerbation_per_year", "acq5", "ocs","icu_times","age_of_onset", "atopy", "nasal_polyps") # select asthma severity metrics
+
+data_cases_protein = data_cases[, which(colnames(data_cases)=="CCL18"): which(colnames(data_cases)=="IL.4")]
+data_cases_confounders = data_cases[,c(which(colnames(data_cases)=="Sex"),
+                                       which(colnames(data_cases)=="Age"),
+                                       which(colnames(data_cases)=="Race"),
+                                       which(colnames(data_cases)=="BMI"),
+                                       which(colnames(data_cases)=="Pack_Years"))]
+
+data_cases_protein_confounders = cbind(data_cases_protein, data_cases_confounders)
+```
+
+Running Stability Selection LASSO on proteomic data with asthma asthma severity metrics as outcome adjusted for Sex, age, race, BMI, and pack_years 
+```{r}
+varSel_sevr_metric = list()
+refit_serv_metric = list()
+coef_sevr_metric_tem = list()
+
+selprop_sevr_metric = as.data.frame(matrix(NA, which(colnames(data_cases)== "IL.4"), dim(data_cases_sevr_metric)[2]))
+rownames(selprop_sevr_metric) = colnames(data_cases)[which(colnames(data_cases)== "CCL18"): which(colnames(data_cases)== "IL.4")]
+colnames(selprop_sevr_metric) = colnames(data_cases_sevr_metric)
+
+# coef_sevr_metric = as.data.frame(matrix(NA, which(colnames(data_cases)== "IL.4"), dim(data_cases_sevr_metric)[2]))
+# rownames(coef_sevr_metric) = colnames(data_cases)[which(colnames(data_cases)== "CCL18"): which(colnames(data_cases)== "IL.4")]
+# colnames(coef_sevr_metric) = colnames(data_cases_sevr_metric)
+coef_sevr_metric = as.data.frame(matrix(NA, which(colnames(data_cases)== "IL.4"),))
+rownames(coef_sevr_metric) = colnames(data_cases)[which(colnames(data_cases)== "CCL18"): which(colnames(data_cases)== "IL.4")]
+colnames(coef_sevr_metric) = "protein"
+coef_sevr_metric$protein = rownames(coef_sevr_metric)
+
+
+selcutoff_sevr_metric = as.data.frame(matrix(NA, 2, dim(data_cases_sevr_metric)[2]))
+rownames(selcutoff_sevr_metric) = c("lambda", "pi")
+colnames(selcutoff_sevr_metric) = colnames(data_cases_sevr_metric)
+
+for(i in 1:dim(data_cases_sevr_metric)[2]){
+  print(i)
+  ## Run stability selection: choose different family based on outcome
+  if(is.numeric(data_cases_sevr_metric[,i])){
+    varSel_sevr_metric[[i]] = VariableSelection(data_cases_protein_confounders, data_cases_sevr_metric[,i], family = "gaussian", penalty.factor = c(rep(1, which(colnames(data_cases_protein_confounders)=="IL.4") - which(colnames(data_cases_protein_confounders)=="CCL18") + 1), rep(0, dim(data_cases_protein_confounders)[2]-which(colnames(data_cases_protein_confounders)=="IL.4"))))
+    refit_serv_metric[[i]] = Refit(xdata = data_cases_protein_confounders, ydata = data_cases_sevr_metric[,i], stability= varSel_sevr_metric[[i]], family = "gaussian")
+  }else if(length(table(data_cases_sevr_metric[,i]))>2){
+    varSel_sevr_metric[[i]] = VariableSelection(data_cases_protein_confounders, data_cases_sevr_metric[,i], family = "multinomial", penalty.factor = c(rep(1, which(colnames(data_cases_protein_confounders)=="IL.4") - which(colnames(data_cases_protein_confounders)=="CCL18") + 1), rep(0, dim(data_cases_protein_confounders)[2]-which(colnames(data_cases_protein_confounders)=="IL.4"))))
+    refit_serv_metric[[i]] = Refit(xdata = data_cases_protein_confounders, ydata = data_cases_sevr_metric[,i], stability= varSel_sevr_metric[[i]], family = "multinomial")
+  } else{
+    varSel_sevr_metric[[i]] = VariableSelection(data_cases_protein_confounders, data_cases_sevr_metric[,i], family = "binomial", penalty.factor = c(rep(1, which(colnames(data_cases_protein_confounders)=="IL.4") - which(colnames(data_cases_protein_confounders)=="CCL18") + 1), rep(0, dim(data_cases_protein_confounders)[2]-which(colnames(data_cases_protein_confounders)=="IL.4"))))
+    refit_serv_metric[[i]] = Refit(xdata = data_cases_protein_confounders, ydata = data_cases_sevr_metric[,i], stability= varSel_sevr_metric[[i]], family = "binomial")
+  }
+  ## Extract selection proportion
+  selprop_sevr_metric[,i] = SelectionProportions(varSel_sevr_metric[[i]])
+  ## Extract threshold of stability selection
+  selcutoff_sevr_metric[,i] = t(Argmax(varSel_sevr_metric[[i]]))
+}
+```
+
+### Heatmap with ggplot
+Data preparation
+Labels
+```{r}
+varlabel_sevr_metric = selprop_sevr_metric
+for(i in 1:dim(varlabel_sevr_metric)[2]){
+  varlabel_sevr_metric[,i] = ifelse(varlabel_sevr_metric[,i]>= as.vector(selcutoff_sevr_metric["pi",i]), 1, 0)
+}
+
+varlabel_sevr_metric$protein = rownames(varlabel_sevr_metric)
+varlabel_sevr_metric  = varlabel_sevr_metric %>% pivot_longer(cols = -protein, names_to = "severity_metric", values_to = "label")
+```
+
+
+Selection Proportion & Merge with label 
+```{r}
+## Prepare selection proportion
+selprop_sevr_heatmap = selprop_sevr_metric
+selprop_sevr_heatmap$protein = rownames(selprop_sevr_heatmap)
+selprop_sevr_heatmap  = selprop_sevr_heatmap %>% pivot_longer(cols = -protein, names_to = "severity_metric", values_to = "selprop")
+
+## Merge label with selection proportion
+selprop_sevr_heatmap = inner_join(selprop_sevr_heatmap, varlabel_sevr_metric)
+
+## Factor protein and severity metrics 
+selprop_sevr_heatmap$protein = factor(selprop_sevr_heatmap$protein, levels = unique(selprop_sevr_heatmap$protein))
+selprop_sevr_heatmap$severity_metric = factor(selprop_sevr_heatmap$severity_metric, levels = unique(selprop_sevr_heatmap$severity_metric))
+```
+
+Plot heatmap
+```{r fig.width=4, fig.height=3.5}
+## Rename the severity metrics
+selprop_sevr_heatmap$severity_metric = recode(selprop_sevr_heatmap$severity_metric,
+                                              "fev1_percentage" = "fev1(%)",
+                                              "fvc_percentage" = "fvc(%)",
+                                              "exacerbation_per_year" = "excrb",
+                                              "severe_exacerbation_per_year" ="sevr excrb",
+                                              "acq5" = "acq5",
+                                              "ocs" = "ocs",
+                                              "icu_times" = "icu times",                 
+                                              "age_of_onset" = "age(onset)",                        
+                                              "atopy" = "atopy",    
+                                              "nasal_polyps" = "nasal polyps")
+
+
+ggplot(selprop_sevr_heatmap, aes(x = severity_metric, y = protein, fill = selprop)) +
+  geom_tile() +
+  geom_text(aes(label = ifelse(label==1, selprop, "")), size=3, color = "navy")+
+  scale_fill_gradient2(low = "white", high = "red") +
+  theme_classic()+
+  labs(x="", y="", title="Selection proportion (Asthma severity ~ proteins)", fill = "Sele Prop")+
+  theme(axis.text.y = element_text(size = 12, hjust=1, vjust = 0.5), 
+        axis.text.x = element_text(size = 12, hjust=0.5, vjust = 0.5, angle=45),
+        plot.title = element_text(hjust = 0.5),)
+```
+
+
+### Partial least square analysis
+Data preparation: 
+```{r}
+data_cases_sevr_metric = data_cases %>% select("fev1_percentage", "fvc_percentage","exacerbation_per_year","severe_exacerbation_per_year", "acq5", "ocs","icu_times","age_of_onset", "atopy", "nasal_polyps") # select asthma severity metrics
+data_cases_sevr_metric$atopy = ifelse(data_cases_sevr_metric$atopy=="negative", 0, 1)
+data_cases_sevr_metric$nasal_polyps = ifelse(data_cases_sevr_metric$nasal_polyps == "0", 0, 1)
+data_cases_sevr_metric$ocs = as.numeric(data_cases_sevr_metric$ocs)
+data_cases_sevr_metric$icu_times = as.numeric(data_cases_sevr_metric$icu_times)
+
+data_cases_protein = data_cases[, which(colnames(data_cases)=="CCL18"): which(colnames(data_cases)=="IL.4")]
+data_cases_confounders = data_cases[,c(which(colnames(data_cases)=="Sex"),
+                                       which(colnames(data_cases)=="Age"),
+                                       which(colnames(data_cases)=="Race"),
+                                       which(colnames(data_cases)=="BMI"),
+                                       which(colnames(data_cases)=="Pack_Years"))]
+```
+
+Remove confounding effects from proteins and asthma severe metrics
+```{r}
+# Remove confounding effect for proteins
+for(i in 1:dim(data_cases_protein)[2]){
+  # print(colnames(data_cases_protein)[i])
+  rm_confounder_protein = lm(data_cases_protein[,i] ~ ., data = data_cases_confounders)
+  data_cases_protein[,i] = rm_confounder_protein$residuals + rm_confounder_protein$coefficients["(Intercept)"]
+  rm(rm_confounder_protein)
+}
+
+# Remove confounding effect for asthma severity metrics
+for(i in 1:dim(data_cases_sevr_metric)[2]){
+  rm_confounder_asthma = lm(data_cases_sevr_metric[,i] ~ ., data = data_cases_confounders)
+  data_cases_sevr_metric[,i]= rm_confounder_asthma$residuals + rm_confounder_asthma$coefficients["(Intercept)"]
+  rm(rm_confounder_asthma)
+}
+```
+
+Run Pls
+```{r}
+# pls_sevr_metric = pls(X=data_cases_sevr_metric, Y=data_cases_protein, ncomp = 10) # scale = TRUE by default
+# pls_sevr_metric$loadings
+# pls_sevr_metric$prop_expl_var
+```
+
+Run stability selected spls: hyper-parameter selection and stability selection are simultaneous achieved with BiSelection(Sharp) 
+```{r}
+## Hyper-parameter calibration and stability selection
+spls_sevr_metric_varsel  = BiSelection(xdata=data_cases_protein, ydata=data_cases_sevr_metric, ncomp = 10)
+
+## Refit spls with calibrated hyper-parameters
+### Y is not calibrated 
+### Number of variables to choose is calibrated with the calibration score
+spls_sevr_metric = spls(X=data_cases_protein, Y=data_cases_sevr_metric, 
+                        keepX = as.vector(Argmax(spls_sevr_metric_varsel)$nx),
+                        ncomp = 10)
+```
+
+
+Extract Explained variance by X component
+```{r}
+explnprop = as.data.frame(spls_sevr_metric$prop_expl_var$X)
+colnames(explnprop) = "prop_expl"
+explnprop$comp = factor(rownames(explnprop), levels=rownames(explnprop))
+```
+
+Plot Explained variance
+```{r}
+
+ggplot(data=explnprop, aes(x=comp, y=prop_expl, group = comp))+
+  # geom_point()+
+  geom_col(width = 0.8, fill = "coral")+
+  geom_text(aes(label=paste0(round(prop_expl,2)*100, "%")))+
+  theme_bw()+
+  labs(x="Component of X", y="Explained proportion of X", title="Explained proportion of components(X)")+
+  theme(axis.text.y = element_text(hjust=1, vjust = 0.5), 
+        axis.text.x = element_text(hjust=0.5, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5),)
+
+# plot(spls_sevr_metric$prop_expl_var$X, type="l", xlab="X Component", ylab="Explained proportion of X", main="Explained proportion of components(X)")
+# plot(spls_sevr_metric$prop_expl_var$Y, type="l", xlab="Y Component", ylab="Explained proportion of Y", main="Explained proportion of components(Y)")
+## we find the first two component can explain most the variance, while component > 2 doesn't explain significantly more variance. 
+```
+
+Extract selection proportion and selected variable of Xcomponent 1 and Xcomponent 2
+```{r}
+## Selected variable of X and Y by PLS
+selvar_sevr_spls = spls_sevr_metric_varsel$selectedX
+selvar_sevr_spls = selvar_sevr_spls[,1:2]
+selvar_sevr_spls = as.data.frame(selvar_sevr_spls)
+selvar_sevr_spls$protein = rownames(selvar_sevr_spls)
+selvar_sevr_spls = selvar_sevr_spls %>% pivot_longer(cols = -protein, names_to = "comp", values_to = "selvar")
+# View(selvar_sevr_spls)
+
+## Selection proportion of X by PLS
+selprop_sevr_spls = spls_sevr_metric_varsel$selpropX
+selprop_sevr_spls = selprop_sevr_spls[,1:2]
+selprop_sevr_spls = as.data.frame(selprop_sevr_spls)
+selprop_sevr_spls$protein = rownames(selprop_sevr_spls)
+selprop_sevr_spls = selprop_sevr_spls %>% pivot_longer(cols = -protein, names_to = "comp", values_to = "selprop")
+# View(selprop_sevr_spls)
+```
+
+Extract loadings of Xcomponent 1 and Xcomponent 2
+```{r}
+load_sevr_spls = spls_sevr_metric$loadings$X
+load_sevr_spls = load_sevr_spls[,1:2]
+load_sevr_spls = as.data.frame(load_sevr_spls)
+load_sevr_spls$protein = rownames(load_sevr_spls)
+load_sevr_spls = load_sevr_spls %>% pivot_longer(cols = -protein, names_to = "comp", values_to = "loadings")
+```
+
+Merge selection proportion, selected variable, and selected variables
+```{r}
+plot_sevr_spls = inner_join(
+  inner_join(selvar_sevr_spls, selprop_sevr_spls),
+  load_sevr_spls)
+```
+
+Plot
+```{r}
+ggplot(data=plot_sevr_spls, aes(y=selprop, x=loadings, color = comp)) +
+  geom_point()+
+  geom_text_repel(aes(y=selprop, x=loadings, 
+                      label=ifelse((comp == "comp1" & selprop>=Argmax(spls_sevr_metric_varsel)$pix[1])
+                                   |(comp == "comp2" & selprop>=Argmax(spls_sevr_metric_varsel)$pix[2]), 
+                                   protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = Argmax(spls_sevr_metric_varsel)$pix[1], linetype = 2, color = "brown1")+
+  geom_text(aes(x = -0.25, y=Argmax(spls_sevr_metric_varsel)$pix[1]+0.05, label = "Pix(comp1)"), color = "brown3", hjust = 0) +
+  geom_hline(yintercept = Argmax(spls_sevr_metric_varsel)$pix[2], linetype = 2, color = "turquoise1")+
+  geom_text(aes(x = -0.25, y=Argmax(spls_sevr_metric_varsel)$pix[2]+0.05, label = "Pix(comp2)"), color = "darkcyan", hjust = 0) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey")+
+  # theme(legend.position = "bottom") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Spls: Selection Prop VS Loadings (Astham severity ~ protein)",
+       x = "Loadings",
+       y = "Selection proportion",
+       color = "Component")
+```
+Run SGPLS(bonus)
+
+
+
+## Aim 5: Outcome as Asthma severity score: : Multinomial regression
+### Data preparation for asthma severity score
+Extract data for building severity score
+```{r}
+# data_cases_score =  data_cases %>% select("ID", "fev1_percentage", "fvc_percentage","exacerbation_per_year","severe_exacerbation_per_year", "acq5", "ocs","icu_times","age_of_onset", "atopy", "nasal_polyps")
+# data_cases_score$atopy = ifelse(data_cases_score$atopy=="negative", 0, 1)
+# data_cases_score$nasal_polyps = ifelse(data_cases_score$nasal_polyps == "0", 0, 1)
+# data_cases_score$ocs = as.numeric(data_cases_score$ocs)
+# data_cases_score$icu_times = as.numeric(data_cases_score$icu_times)
+# write.csv(data_cases_score, "./data/data_cases_score.csv")
+```
+
+```{r}
+data_cases_clusters = read.csv("data/data_cluster_label_0507.csv")
+data_cases_clusters = inner_join(data_cases, data_cases_clusters %>% select(ID, clinical_score),  by = "ID")
+data_cases_clusters$clinical_score = factor(data_cases_clusters$clinical_score)
+```
+```{r}
+data_cases_varsel_score = as.data.frame(data_cases_clusters$clinical_score)
+```
+
+
+### Univariate analysis: Multinomial model adjusted for sex, age, race, BMI, and Smoking(Pack years)
+Fit model 
+```{r}
+## Container for data output
+multinom_score_model = list()
+multinom_score_coef = as.data.frame(matrix(NA, which(colnames(data_cases_clusters)== "IL.4"), 12))
+colnames(multinom_score_coef) = c("coef(cluster1)", "coef(cluster2)","coef(cluster3)","coef(cluster4)",
+                                  "se(cluster1)", "se(cluster2)","se(cluster3)","se(cluster4)",
+                                  "p(cluster1)", "p(cluster2)","p(cluster3)","p(cluster4)")
+rownames(multinom_score_coef) = colnames(data_cases_clusters)[which(colnames(data_cases_clusters)=="CCL18"): which(colnames(data_cases_clusters)== "IL.4")]
+
+## Model fitting and coefficient extractuing
+for(i in which(colnames(data_cases_clusters)=="CCL18"): which(colnames(data_cases_clusters)== "IL.4")){
+  multinom_score_model[[i]]=multinom(clinical_score ~ data_cases_clusters[,i] + Sex + Age + Race + BMI + Pack_Years, data=data_cases_clusters)
+  multinom_score_coef[i,] = c(coef(multinom_score_model[[i]])[,2] , # point estimate
+                                  summary(multinom_score_model[[i]])$standard.errors[,2], # Standard Error
+                                  (1-pnorm(abs(coef(multinom_score_model[[i]])[,2]/summary(multinom_score_model[[i]])$standard.errors[,2]),0,1))*2 # P valaue
+                                  )}
+
+multinom_score_coef$`pBH(cluster1)` = p.adjust(multinom_score_coef$`p(cluster1)`, method = "BH")
+multinom_score_coef$`pBH(cluster2)` = p.adjust(multinom_score_coef$`p(cluster2)`, method = "BH")
+multinom_score_coef$`pBH(cluster3)` = p.adjust(multinom_score_coef$`p(cluster3)`, method = "BH")
+multinom_score_coef$`pBH(cluster4)` = p.adjust(multinom_score_coef$`p(cluster4)`, method = "BH")
+```
+
+Plot
+Data preparation for plot
+```{r}
+multinom_score_coef_plot = multinom_score_coef %>% mutate(protein = rownames(multinom_score_coef))
+colnames(multinom_score_coef_plot) = c("Cluster1", "Cluster2", "Cluster3", "Cluster4", 
+                                           "Cluster1", "Cluster2", "Cluster3", "Cluster4",
+                                           "Cluster1", "Cluster2", "Cluster3", "Cluster4",
+                                           "Cluster1", "Cluster2", "Cluster3", "Cluster4",
+                                           "protein")
+multinom_score_coef_plot = 
+  inner_join(
+  inner_join(
+  inner_join(
+  multinom_score_coef_plot[,c(1:4,17)] %>% pivot_longer(cols = -protein ,values_to = "coef", names_to = "cluster"),
+  multinom_score_coef_plot[,c(5:8,17)] %>% pivot_longer(cols = -protein ,values_to = "se", names_to = "cluster")
+  ),
+  multinom_score_coef_plot[,c(9:12,17)] %>% pivot_longer(cols = -protein ,values_to = "Pvalue", names_to = "cluster")
+  ),
+  multinom_score_coef_plot[,c(13:16,17)] %>% pivot_longer(cols = -protein ,values_to = "BHPvalue", names_to = "cluster")
+  )
+```
+Plot scatter plot
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=multinom_score_coef_plot, aes(y=exp(coef), x=-log10(BHPvalue), color = cluster)) +
+  geom_point()+
+  geom_text_repel(aes(y=exp(coef), x=-log10(BHPvalue), label=ifelse(-log10(BHPvalue)>-log10(0.05),protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = 1, linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Multinomial univariate logist: Astham score ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Odds ratio",
+       color = "Clinical score")
+```
+
+### Stability selection lasso
+Running Stability Selection LASSO on proteomic data with asthma phenotype as outcome adjusted for Sex, age, race, BMI, and pack_years 
+```{r}
+varSel_score = VariableSelection(data_cases_varsel_x, data_cases_varsel_score, family = "multinomial",
+                                     penalty.factor = c(rep(1, which(colnames(data_cases_varsel_x)=="IL.4") - which(colnames(data_cases_varsel_x)=="CCL18") + 1),
+                                                        rep(0, dim(data_cases_varsel_x)[2]-which(colnames(data_cases_varsel_x)=="IL.4")))) 
+selprop_score = SelectionProportions(varSel_score)
+selprop_score = as.data.frame(selprop_score)
+selprop_score$protein = rownames(selprop_score)
+```
+### PLOT
+#### Stability selection plot
+```{r  fig.width=4, fig.height=3.5}
+ggplot(data=selprop_score, aes(x=protein, y=selprop_score)) + 
+  geom_col(width = 0.6, fill= ifelse(selprop_score$selprop_score>=Argmax(varSel_score)[,"pi"], "red", "grey")) + 
+  theme_bw()+
+  theme(axis.text.x.bottom = element_text(angle=45, size = 12, hjust=1, vjust = 1), plot.title = element_text(hjust = 0.5))+
+  geom_hline(yintercept = Argmax(varSel_score)[,"pi"], col = "red", linetype=2)+
+  labs(title="Variable selection proportion(asthma score)", y="selection proportion")
+```
+
+#### Stability selection lasso VS univariate analysis
+Prepare data for plot
+```{r}
+multinom_score_coef_plot = multinom_score_coef %>% mutate(protein = rownames(multinom_score_coef))
+multinom_score_coef_plot = inner_join(multinom_score_coef_plot, selprop_score)
+colnames(multinom_score_coef_plot) = c("Cluster1", "Cluster2", "Cluster3", "Cluster4", 
+                                           "Cluster1", "Cluster2", "Cluster3", "Cluster4",
+                                           "Cluster1", "Cluster2", "Cluster3", "Cluster4",
+                                           "Cluster1", "Cluster2", "Cluster3", "Cluster4",
+                                           "protein", "selprop")
+multinom_score_coef_plot = 
+  inner_join(
+  inner_join(
+  inner_join(
+  multinom_score_coef_plot[,c(1:4,17,18)] %>% pivot_longer(cols = -c("protein","selprop") ,values_to = "coef", names_to = "cluster"),
+  multinom_score_coef_plot[,c(5:8,17,18)] %>% pivot_longer(cols = -c("protein","selprop") ,values_to = "se", names_to = "cluster")
+  ),
+  multinom_score_coef_plot[,c(9:12,17,18)] %>% pivot_longer(cols = -c("protein","selprop") ,values_to = "Pvalue", names_to = "cluster")
+  ),
+  multinom_score_coef_plot[,c(13:16,17,18)] %>% pivot_longer(cols = -c("protein","selprop") ,values_to = "BHPvalue", names_to = "cluster")
+  )
+```
+
+Make comparison plot between uni-variate analysis and stability selection lasso
+```{r fig.width=4, fig.height=3.5}
+ggplot(data=multinom_score_coef_plot, aes(y=selprop, x=-log10(BHPvalue), color = cluster)) +
+  geom_point()+
+  geom_text_repel(aes(y=selprop, x=-log10(BHPvalue), 
+                      label=ifelse(-log10(BHPvalue)>-log10(0.05)&selprop>=Argmax(varSel_score)[,"pi"],protein,"")))+
+  theme_bw()+
+  geom_hline(yintercept = Argmax(varSel_score)[,"pi"], linetype = 2)+
+  geom_vline(xintercept = -log10(0.05), linetype = 2)+
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Univariate VS Var selection: Astham score ~ protein",
+       x = "BH adjusted -log10(p)",
+       y = "Selection proportion",
+       color = "score")
+```
+
+
+## Summarize Aim 4 and Aim 5
+```{r}
+selprop_score_heatmap = as.data.frame(matrix(NA, dim(selprop_score)[1], 4))
+colnames(selprop_score_heatmap) = c("protein", "metric", "selprop", "label")
+selprop_score_heatmap$protein = selprop_score$protein
+selprop_score_heatmap$selprop = selprop_score$selprop_score
+selprop_score_heatmap$metric = "Sevr score"
+selprop_score_heatmap$label = ifelse(selprop_score_heatmap$selprop>=Argmax(varSel_score)[,"pi"], 1, 0)
+```
+
+```{r}
+selprop_spls_heatmap = inner_join(selprop_sevr_spls, selvar_sevr_spls)
+colnames(selprop_spls_heatmap) = c("protein", "metric", "selprop", "label")
+
+```
+
+```{r}
+colnames(selprop_sevr_heatmap) = c("protein", "metric", "selprop", "label")
+```
+
+
+```{r}
+summary_heatmap = rbind(selprop_sevr_heatmap, # uni-outcome stability selection lasso 
+                        selprop_spls_heatmap, #SPLS component 1 and component 2
+                        selprop_score_heatmap # Clinical score
+                        )
+
+
+# rm(selprop_sevr_heatmap, selprop_spls_heatmap, selprop_spls_heatmap)
+```
+
+```{r fig.width=5, fig.height=4}
+ggplot(summary_heatmap, aes(x = metric, y = protein, fill = selprop)) +
+  geom_tile() +
+  geom_text(aes(label = ifelse(label==1, selprop, "")), size=3, color = "navy")+
+  scale_fill_gradient2(low = "white", high = "red") +
+  theme_classic()+
+  labs(x="", y="", title="Selection proportion (Asthma severity ~ proteins)", fill = "Sele Prop")+
+  theme(axis.text.y = element_text(size = 12, hjust=1, vjust = 0.5), 
+        axis.text.x = element_text(size = 12, hjust=0.5, vjust = 0.7, angle=45, 
+                                   color = c(rep("deeppink", length(unique(selprop_sevr_heatmap$metric))),
+                                             rep("navy", length(unique(selprop_spls_heatmap$metric))),
+                                             rep("chocolate", length(unique(selprop_score_heatmap$metric))))),
+        plot.title = element_text(hjust = 0.5))
+```
+
